@@ -140,6 +140,7 @@ import android.os.PowerManager;
 import android.os.RemoteException;
 import android.os.ServiceSpecificException;
 import android.os.SystemClock;
+import android.os.SystemProperties;
 import android.os.Trace;
 import android.os.UserHandle;
 import android.provider.DeviceConfig;
@@ -148,6 +149,7 @@ import android.provider.Settings.Global;
 import android.service.NetworkInterfaceProto;
 import android.service.NetworkStatsServiceDumpProto;
 import android.system.ErrnoException;
+import android.system.Os;
 import android.telephony.PhoneStateListener;
 import android.telephony.SubscriptionPlan;
 import android.text.TextUtils;
@@ -1837,6 +1839,15 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
     }
 
     private void setKernelCounterSet(int uid, int set) {
+        if (!SystemProperties.getBoolean("ro.kernel.ebpf.supported", true)) {
+            final int error = nativeSetLegacyCounterSet(uid, set);
+            if (error != 0) {
+                Log.e(TAG, "Failed to set legacy counter set for uid " + uid
+                        + ": " + Os.strerror(error));
+            }
+            return;
+        }
+
         if (mUidCounterSetMap == null) {
             Log.wtf(TAG, "Fail to set UidCounterSet: Null bpf map");
             return;
@@ -3427,6 +3438,8 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
 
     // TODO: Read stats by using BpfNetMapsReader.
     private static native void nativeRegisterIface(String iface);
+    private static native int nativeSetLegacyCounterSet(int uid, int set);
+
     @Nullable
     private static native NetworkStats.Entry nativeGetTotalStat();
     @Nullable

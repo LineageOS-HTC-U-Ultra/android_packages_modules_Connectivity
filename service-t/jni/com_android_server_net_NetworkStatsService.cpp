@@ -17,6 +17,7 @@
 #define LOG_TAG "NetworkStatsNative"
 
 #include <android-base/properties.h>
+#include <android-base/unique_fd.h>
 #include <cutils/qtaguid.h>
 #include <dirent.h>
 #include <errno.h>
@@ -47,6 +48,19 @@ static void nativeRegisterIface(JNIEnv* env, jclass clazz, jstring iface) {
     ScopedUtfChars iface8(env, iface);
     if (iface8.c_str() == nullptr) return;
     bpfRegisterIface(iface8.c_str());
+}
+
+// qtaguid uses counter set 0 for background and 1 for foreground traffic.
+static jint nativeSetLegacyCounterSet(JNIEnv*, jclass, jint uid, jint set) {
+    if (uid < 0 || (set != 0 && set != 1)) return EINVAL;
+    android::base::unique_fd fd(open("/proc/net/xt_qtaguid/ctrl", O_WRONLY | O_CLOEXEC));
+    if (fd.get() < 0) return errno;
+    char command[64];
+    const int length = snprintf(command, sizeof(command), "s %d %u", set,
+                                static_cast<unsigned int>(uid));
+    const ssize_t written = TEMP_FAILURE_RETRY(write(fd.get(), command, length));
+    if (written < 0) return errno;
+    return written == length ? 0 : EIO;
 }
 
 static jobject statsValueToEntry(JNIEnv* env, StatsValue* stats) {
@@ -178,6 +192,7 @@ static void nativeInitNetworkTracing(JNIEnv* env, jclass clazz) {
 }
 
 static const JNINativeMethod gMethods[] = {
+    { "nativeSetLegacyCounterSet", "(II)I", (void*) nativeSetLegacyCounterSet },
         {
             "nativeRegisterIface",
             "(Ljava/lang/String;)V",
