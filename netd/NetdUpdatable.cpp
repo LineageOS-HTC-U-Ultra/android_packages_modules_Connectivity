@@ -19,6 +19,7 @@
 #include "BpfHandler.h"
 
 #include <android-base/logging.h>
+#include <android-base/properties.h>
 #include <netdutils/Status.h>
 
 #include "NetdUpdatablePublic.h"
@@ -29,6 +30,10 @@ int libnetd_updatable_init(const char* cg2_path) {
     android::base::InitLogging(/*argv=*/nullptr);
     LOG(INFO) << __func__ << ": Initializing";
 
+    if (!android::base::GetBoolProperty("ro.kernel.ebpf.supported", true)) {
+        LOG(WARNING) << "Legacy kernel: skipping unavailable network BPF maps";
+        return 0;
+    }
     android::netdutils::Status ret = sBpfHandler.init(cg2_path);
     if (!android::netdutils::isOk(ret)) {
         LOG(ERROR) << __func__ << ": Failed: (" << ret.code() << ") " << ret.msg();

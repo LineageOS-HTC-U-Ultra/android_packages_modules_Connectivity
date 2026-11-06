@@ -232,6 +232,12 @@ int main(int argc, char** argv, char * const envp[]) {
 
     ALOGI("NetBpfLoad '%s' starting...", argv[0]);
 
+    // oce and other explicitly opted-out legacy kernels have no eBPF support.
+    if (!android::base::GetBoolProperty("ro.kernel.ebpf.supported", true)) {
+        ALOGW("Legacy kernel: network BPF loading explicitly disabled");
+        return android::base::SetProperty("bpf.progs_loaded", "1") ? 0 : 1;
+    }
+
     // true iff we are running from the module
     const bool is_mainline = !strcmp(argv[0], apexNetBpfLoad);
 
