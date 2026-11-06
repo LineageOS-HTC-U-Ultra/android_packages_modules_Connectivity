@@ -32,6 +32,7 @@
 #include <utils/Log.h>
 #include <utils/misc.h>
 
+#include "android-base/properties.h"
 #include "android-base/unique_fd.h"
 #include "bpf/BpfUtils.h"
 #include "netdbpf/BpfNetworkStats.h"
@@ -170,11 +171,59 @@ static int statsLinesToNetworkStats(JNIEnv* env, jclass clazz, jobject stats,
     return 0;
 }
 
+// Legacy kernels expose cumulative qtaguid counters instead of BPF maps.
+// The tag's upper 32 bits are the framework accounting tag (as in AOSP's
+// legacyReadNetworkStatsDetail before 7106fed750 removed qtaguid support).
+static int readLegacyNetworkStats(std::vector<stats_line>* lines, bool detail) {
+    const char* path = detail ? "/proc/net/xt_qtaguid/stats"
+                              : "/proc/net/xt_qtaguid/iface_stat_fmt";
+    FILE* fp = fopen(path, "re");
+    if (fp == nullptr) return -1;
+    char buffer[1024];
+    unsigned lastIndex = 1;
+    int result = 0;
+    while (fgets(buffer, sizeof(buffer), fp) != nullptr) {
+        stats_line line = {};
+        unsigned index;
+        uint64_t tag;
+        int matched;
+        if (detail) {
+            if (strncmp(buffer, "idx ", 4) == 0) continue;
+            matched = sscanf(buffer, "%u %31s %" SCNx64 " %u %u %" SCNd64
+                             " %" SCNd64 " %" SCNd64 " %" SCNd64,
+                             &index, line.iface, &tag, &line.uid, &line.set,
+                             &line.rxBytes, &line.rxPackets, &line.txBytes, &line.txPackets);
+            if (matched != 9 || index != lastIndex + 1) {
+                result = -1;
+                break;
+            }
+            lastIndex = index;
+            line.tag = tag >> 32;
+        } else {
+            if (strncmp(buffer, "ifname ", 7) == 0) continue;
+            matched = sscanf(buffer, "%31s %" SCNd64 " %" SCNd64 " %" SCNd64 " %" SCNd64,
+                             line.iface, &line.rxBytes, &line.rxPackets,
+                             &line.txBytes, &line.txPackets);
+            if (matched != 5) {
+                result = -1;
+                break;
+            }
+            line.uid = static_cast<uint32_t>(-1);
+            line.set = static_cast<uint32_t>(-1);
+        }
+        lines->push_back(line);
+    }
+    if (ferror(fp)) result = -1;
+    if (fclose(fp) != 0) result = -1;
+    return result;
+}
+
 static int readNetworkStatsDetail(JNIEnv* env, jclass clazz, jobject stats) {
     std::vector<stats_line> lines;
 
-    if (parseBpfNetworkStatsDetail(&lines) < 0)
-        return -1;
+    const bool useBpf = android::base::GetBoolProperty("ro.kernel.ebpf.supported", true);
+    if ((useBpf ? parseBpfNetworkStatsDetail(&lines)
+                : readLegacyNetworkStats(&lines, true)) < 0) return -1;
 
     return statsLinesToNetworkStats(env, clazz, stats, lines);
 }
@@ -182,8 +231,9 @@ static int readNetworkStatsDetail(JNIEnv* env, jclass clazz, jobject stats) {
 static int readNetworkStatsDev(JNIEnv* env, jclass clazz, jobject stats) {
     std::vector<stats_line> lines;
 
-    if (parseBpfNetworkStatsDev(&lines) < 0)
-            return -1;
+    const bool useBpf = android::base::GetBoolProperty("ro.kernel.ebpf.supported", true);
+    if ((useBpf ? parseBpfNetworkStatsDev(&lines)
+                : readLegacyNetworkStats(&lines, false)) < 0) return -1;
 
     return statsLinesToNetworkStats(env, clazz, stats, lines);
 }

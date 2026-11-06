@@ -16,6 +16,7 @@
 
 #define LOG_TAG "NetworkStatsNative"
 
+#include <android-base/properties.h>
 #include <cutils/qtaguid.h>
 #include <dirent.h>
 #include <errno.h>
@@ -38,6 +39,9 @@ using android::bpf::bpfRegisterIface;
 using android::bpf::NetworkTraceHandler;
 
 namespace android {
+
+static const char* QTAGUID_IFACE_STATS = "/proc/net/xt_qtaguid/iface_stat_fmt";
+static const char* QTAGUID_UID_STATS = "/proc/net/xt_qtaguid/stats";
 
 static void nativeRegisterIface(JNIEnv* env, jclass clazz, jstring iface) {
     ScopedUtfChars iface8(env, iface);
@@ -73,14 +77,76 @@ static jobject statsValueToEntry(JNIEnv* env, StatsValue* stats) {
     return result;
 }
 
+static int parseIfaceStats(const char* iface, StatsValue* stats) {
+    FILE *fp = fopen(QTAGUID_IFACE_STATS, "r");
+    if (fp == NULL) {
+        return -1;
+    }
+
+    char buffer[384];
+    char cur_iface[32];
+    uint64_t rxBytes, rxPackets, txBytes, txPackets, tcpRxPackets, tcpTxPackets;
+
+    while (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        int matched = sscanf(buffer, "%31s %" SCNu64 " %" SCNu64 " %" SCNu64
+                " %" SCNu64 " " "%*u %" SCNu64 " %*u %*u %*u %*u "
+                "%*u %" SCNu64 " %*u %*u %*u %*u", cur_iface, &rxBytes,
+                &rxPackets, &txBytes, &txPackets, &tcpRxPackets, &tcpTxPackets);
+        if (matched >= 5) {
+            if (!iface || !strcmp(iface, cur_iface)) {
+                stats->rxBytes += rxBytes;
+                stats->rxPackets += rxPackets;
+                stats->txBytes += txBytes;
+                stats->txPackets += txPackets;
+            }
+        }
+    }
+
+    if (fclose(fp) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int parseUidStats(const uint32_t uid, StatsValue* stats) {
+    FILE *fp = fopen(QTAGUID_UID_STATS, "r");
+    if (fp == NULL) {
+        return -1;
+    }
+
+    char buffer[384];
+    char iface[32];
+    uint32_t idx, cur_uid, set;
+    uint64_t tag, rxBytes, rxPackets, txBytes, txPackets;
+
+    while (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        if (sscanf(buffer,
+                "%" SCNu32 " %31s 0x%" SCNx64 " %u %u %" SCNu64 " %" SCNu64
+                " %" SCNu64 " %" SCNu64 "",
+                &idx, iface, &tag, &cur_uid, &set, &rxBytes, &rxPackets,
+                &txBytes, &txPackets) == 9) {
+            if (uid == cur_uid && tag == 0L) {
+                stats->rxBytes += rxBytes;
+                stats->rxPackets += rxPackets;
+                stats->txBytes += txBytes;
+                stats->txPackets += txPackets;
+            }
+        }
+    }
+
+    if (fclose(fp) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
 static jobject nativeGetTotalStat(JNIEnv* env, jclass clazz) {
     StatsValue stats = {};
 
-    if (bpfGetIfaceStats(nullptr, &stats) == 0) {
-        return statsValueToEntry(env, &stats);
-    } else {
-        return nullptr;
+    if (android::base::GetBoolProperty("ro.kernel.ebpf.supported", true)) {
+        return bpfGetIfaceStats(nullptr, &stats) == 0 ? statsValueToEntry(env, &stats) : nullptr;
     }
+    return parseIfaceStats(nullptr, &stats) == 0 ? statsValueToEntry(env, &stats) : nullptr;
 }
 
 static jobject nativeGetIfaceStat(JNIEnv* env, jclass clazz, jstring iface) {
@@ -91,21 +157,20 @@ static jobject nativeGetIfaceStat(JNIEnv* env, jclass clazz, jstring iface) {
 
     StatsValue stats = {};
 
-    if (bpfGetIfaceStats(iface8.c_str(), &stats) == 0) {
-        return statsValueToEntry(env, &stats);
-    } else {
-        return nullptr;
+    if (android::base::GetBoolProperty("ro.kernel.ebpf.supported", true)) {
+        return bpfGetIfaceStats(iface8.c_str(), &stats) == 0 ? statsValueToEntry(env, &stats)
+                                                             : nullptr;
     }
+    return parseIfaceStats(iface8.c_str(), &stats) == 0 ? statsValueToEntry(env, &stats) : nullptr;
 }
 
 static jobject nativeGetUidStat(JNIEnv* env, jclass clazz, jint uid) {
     StatsValue stats = {};
 
-    if (bpfGetUidStats(uid, &stats) == 0) {
-        return statsValueToEntry(env, &stats);
-    } else {
-        return nullptr;
+    if (android::base::GetBoolProperty("ro.kernel.ebpf.supported", true)) {
+        return bpfGetUidStats(uid, &stats) == 0 ? statsValueToEntry(env, &stats) : nullptr;
     }
+    return parseUidStats(uid, &stats) == 0 ? statsValueToEntry(env, &stats) : nullptr;
 }
 
 static void nativeInitNetworkTracing(JNIEnv* env, jclass clazz) {
