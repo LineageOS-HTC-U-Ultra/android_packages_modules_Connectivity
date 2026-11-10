@@ -63,6 +63,8 @@ public class SkDestroyListener extends NetlinkMonitor {
 
     @Override
     public void processNetlinkMessage(final NetlinkMessage nlMsg, final long whenMs) {
+        // No cookie-tag BPF map exists on explicitly supported legacy kernels.
+        if (mCookieTagMap == null) return;
         if (!(nlMsg instanceof InetDiagMessage)) {
             mLog.e("Received non InetDiagMessage");
             return;

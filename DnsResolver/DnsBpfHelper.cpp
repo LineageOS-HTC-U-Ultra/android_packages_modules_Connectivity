@@ -17,6 +17,7 @@
 #define LOG_TAG "DnsBpfHelper"
 
 #include "DnsBpfHelper.h"
+#include <android-base/properties.h>
 
 #include <android-base/logging.h>
 #include <android-modules-utils/sdk_level.h>
@@ -33,6 +34,11 @@ namespace net {
   } while (0)
 
 base::Result<void> DnsBpfHelper::init() {
+  if (!android::base::GetBoolProperty("ro.kernel.ebpf.supported", true)) {
+    LOG(WARNING) << "Legacy kernel: DNS BPF maps explicitly disabled";
+    return {};
+  }
+
   if (!android::modules::sdklevel::IsAtLeastT()) {
     LOG(ERROR) << __func__ << ": Unsupported before Android T.";
     return base::Error(EOPNOTSUPP);
@@ -46,6 +52,7 @@ base::Result<void> DnsBpfHelper::init() {
 
 base::Result<bool> DnsBpfHelper::isUidNetworkingBlocked(uid_t uid, bool metered) {
   if (is_system_uid(uid)) return false;
+  if (!android::base::GetBoolProperty("ro.kernel.ebpf.supported", true)) return false;
   if (!mConfigurationMap.isValid() || !mUidOwnerMap.isValid()) {
     LOG(ERROR) << __func__
                << ": BPF maps are not ready. Forgot to call ADnsHelper_init?";

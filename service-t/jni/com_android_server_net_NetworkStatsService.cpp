@@ -45,6 +45,7 @@ static const char* QTAGUID_IFACE_STATS = "/proc/net/xt_qtaguid/iface_stat_fmt";
 static const char* QTAGUID_UID_STATS = "/proc/net/xt_qtaguid/stats";
 
 static void nativeRegisterIface(JNIEnv* env, jclass clazz, jstring iface) {
+    if (!android::base::GetBoolProperty("ro.kernel.ebpf.supported", true)) return;
     ScopedUtfChars iface8(env, iface);
     if (iface8.c_str() == nullptr) return;
     bpfRegisterIface(iface8.c_str());

@@ -630,13 +630,24 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
         mContentObserver = mDeps.makeContentObserver(mHandler, mSettings,
                 mNetworkStatsSubscriptionsMonitor);
         mLocationPermissionChecker = mDeps.makeLocationPermissionChecker(mContext);
-        mInterfaceMapHelper = mDeps.makeBpfInterfaceMapHelper();
-        mUidCounterSetMap = mDeps.getUidCounterSetMap();
-        mCookieTagMap = mDeps.getCookieTagMap();
-        mStatsMapA = mDeps.getStatsMapA();
-        mStatsMapB = mDeps.getStatsMapB();
-        mAppUidStatsMap = mDeps.getAppUidStatsMap();
-        mIfaceStatsMap = mDeps.getIfaceStatsMap();
+        final boolean bpfSupported = android.os.SystemProperties.getBoolean(
+                "ro.kernel.ebpf.supported", true);
+        mInterfaceMapHelper = bpfSupported ? mDeps.makeBpfInterfaceMapHelper() : null;
+        if (bpfSupported) {
+            mUidCounterSetMap = mDeps.getUidCounterSetMap();
+            mCookieTagMap = mDeps.getCookieTagMap();
+            mStatsMapA = mDeps.getStatsMapA();
+            mStatsMapB = mDeps.getStatsMapB();
+            mAppUidStatsMap = mDeps.getAppUidStatsMap();
+            mIfaceStatsMap = mDeps.getIfaceStatsMap();
+        } else {
+            mUidCounterSetMap = null;
+            mCookieTagMap = null;
+            mStatsMapA = null;
+            mStatsMapB = null;
+            mAppUidStatsMap = null;
+            mIfaceStatsMap = null;
+        }
         // To prevent any possible races, the flag is not allowed to change until rebooting.
         mSupportEventLogger = mDeps.supportEventLogger(mContext);
         if (mSupportEventLogger) {
@@ -651,7 +662,9 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
         // NetworkStatsService starts Java SkDestroyListener (new code).
         final BpfNetMaps bpfNetMaps = mDeps.makeBpfNetMaps(mContext);
         mSkDestroyListener = mDeps.makeSkDestroyListener(mCookieTagMap, mHandler);
-        mHandler.post(mSkDestroyListener::start);
+        if (mCookieTagMap != null) {
+            mHandler.post(mSkDestroyListener::start);
+        }
     }
 
     /**
@@ -2595,6 +2608,7 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
      * @param uid
      */
     private void deleteKernelTagData(int uid) {
+        if (mCookieTagMap == null) return;
         try {
             mCookieTagMap.forEach((key, value) -> {
                 // If SkDestroyListener deletes the socket tag while this code is running,
@@ -2911,7 +2925,11 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
             pw.println();
             pw.println("InterfaceMapHelper:");
             pw.increaseIndent();
-            mInterfaceMapHelper.dump(pw);
+            if (mInterfaceMapHelper == null) {
+                pw.println("Unavailable: eBPF is disabled by device configuration");
+            } else {
+                mInterfaceMapHelper.dump(pw);
+            }
             pw.decreaseIndent();
 
             pw.println();
@@ -3005,6 +3023,11 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
     }
 
     private void dumpMapStatus(final IndentingPrintWriter pw) {
+        if (mCookieTagMap == null || mUidCounterSetMap == null || mAppUidStatsMap == null
+                || mStatsMapA == null || mStatsMapB == null || mIfaceStatsMap == null) {
+            pw.println("Unavailable: one or more BPF maps are not initialized");
+            return;
+        }
         BpfDump.dumpMapStatus(mCookieTagMap, pw, "mCookieTagMap", COOKIE_TAG_MAP_PATH);
         BpfDump.dumpMapStatus(mUidCounterSetMap, pw, "mUidCounterSetMap", UID_COUNTERSET_MAP_PATH);
         BpfDump.dumpMapStatus(mAppUidStatsMap, pw, "mAppUidStatsMap", APP_UID_STATS_MAP_PATH);
@@ -3073,6 +3096,9 @@ public class NetworkStatsService extends INetworkStatsService.Stub {
 
     @GuardedBy("mStatsLock")
     private void dumpIfaceStatsMapLocked(final IndentingPrintWriter pw) {
+        if (mIfaceStatsMap == null || mInterfaceMapHelper == null) {
+            return;
+        }
         BpfDump.dumpMap(mIfaceStatsMap, pw, "mIfaceStatsMap",
                 "ifaceIndex ifaceName rxBytes rxPackets txBytes txPackets",
                 (key, value) -> {
