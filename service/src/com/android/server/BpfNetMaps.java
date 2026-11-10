@@ -36,6 +36,15 @@ import static android.net.BpfNetMapsUtils.isFirewallAllowList;
 import static android.net.BpfNetMapsUtils.matchToString;
 import static android.net.ConnectivityManager.FIREWALL_RULE_ALLOW;
 import static android.net.ConnectivityManager.FIREWALL_RULE_DENY;
+import static android.net.ConnectivityManager.FIREWALL_CHAIN_BACKGROUND;
+import static android.net.ConnectivityManager.FIREWALL_CHAIN_DOZABLE;
+import static android.net.ConnectivityManager.FIREWALL_CHAIN_LOW_POWER_STANDBY;
+import static android.net.ConnectivityManager.FIREWALL_CHAIN_OEM_DENY_1;
+import static android.net.ConnectivityManager.FIREWALL_CHAIN_OEM_DENY_2;
+import static android.net.ConnectivityManager.FIREWALL_CHAIN_OEM_DENY_3;
+import static android.net.ConnectivityManager.FIREWALL_CHAIN_POWERSAVE;
+import static android.net.ConnectivityManager.FIREWALL_CHAIN_RESTRICTED;
+import static android.net.ConnectivityManager.FIREWALL_CHAIN_STANDBY;
 import static android.net.INetd.PERMISSION_INTERNET;
 import static android.net.INetd.PERMISSION_NONE;
 import static android.net.INetd.PERMISSION_UNINSTALLED;
@@ -246,6 +255,10 @@ public class BpfNetMaps {
 
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     private static void initBpfMaps() {
+        if (!android.os.SystemProperties.getBoolean("ro.kernel.ebpf.supported", true)) {
+            return;
+        }
+
         if (sConfigurationMap == null) {
             sConfigurationMap = getConfigurationMap();
         }
@@ -366,7 +379,14 @@ public class BpfNetMaps {
     @VisibleForTesting
     public BpfNetMaps(final Context context, final INetd netd, final Dependencies deps) {
         if (SdkLevel.isAtLeastT()) {
-            ensureInitialized(context);
+            try {
+                ensureInitialized(context);
+            } catch (IllegalStateException t) {
+                if (android.os.SystemProperties.getBoolean("ro.kernel.ebpf.supported", true)) {
+                    throw t;
+                }
+                Log.w(TAG, "Legacy kernel: network BPF maps unavailable", t);
+            }
         }
         mNetd = netd;
         mDeps = deps;
@@ -385,6 +405,8 @@ public class BpfNetMaps {
     }
 
     private void removeRule(final int uid, final long match, final String caller) {
+        if (sUidOwnerMap == null) return;
+
         try {
             synchronized (sUidOwnerMap) {
                 final UidOwnerValue oldMatch = sUidOwnerMap.getValue(new S32(uid));
@@ -412,6 +434,8 @@ public class BpfNetMaps {
     }
 
     private void addRule(final int uid, final long match, final int iif, final String caller) {
+        if (sUidOwnerMap == null) return;
+
         if (match != IIF_MATCH && iif != 0) {
             throw new ServiceSpecificException(EINVAL,
                     "Non-interface match must have zero interface index");
@@ -456,6 +480,16 @@ public class BpfNetMaps {
     public void addNaughtyApp(final int uid) {
         throwIfPreT("addNaughtyApp is not available on pre-T devices");
 
+        if (sUidOwnerMap == null) {
+            try {
+                mNetd.bandwidthAddNaughtyApp(uid);
+                BpfNetMapsReader.setLegacySpecialApp(uid, true, true);
+                return;
+            } catch (RemoteException e) {
+                throw new IllegalStateException("Failed to add legacy naughty app", e);
+            }
+        }
+
         addRule(uid, PENALTY_BOX_MATCH, "addNaughtyApp");
     }
 
@@ -469,6 +503,16 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void removeNaughtyApp(final int uid) {
         throwIfPreT("removeNaughtyApp is not available on pre-T devices");
+
+        if (sUidOwnerMap == null) {
+            try {
+                mNetd.bandwidthRemoveNaughtyApp(uid);
+                BpfNetMapsReader.setLegacySpecialApp(uid, true, false);
+                return;
+            } catch (RemoteException e) {
+                throw new IllegalStateException("Failed to remove legacy naughty app", e);
+            }
+        }
 
         removeRule(uid, PENALTY_BOX_MATCH, "removeNaughtyApp");
     }
@@ -484,6 +528,16 @@ public class BpfNetMaps {
     public void addNiceApp(final int uid) {
         throwIfPreT("addNiceApp is not available on pre-T devices");
 
+        if (sUidOwnerMap == null) {
+            try {
+                mNetd.bandwidthAddNiceApp(uid);
+                BpfNetMapsReader.setLegacySpecialApp(uid, false, true);
+                return;
+            } catch (RemoteException e) {
+                throw new IllegalStateException("Failed to add legacy nice app", e);
+            }
+        }
+
         addRule(uid, HAPPY_BOX_MATCH, "addNiceApp");
     }
 
@@ -497,6 +551,16 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void removeNiceApp(final int uid) {
         throwIfPreT("removeNiceApp is not available on pre-T devices");
+
+        if (sUidOwnerMap == null) {
+            try {
+                mNetd.bandwidthRemoveNiceApp(uid);
+                BpfNetMapsReader.setLegacySpecialApp(uid, false, false);
+                return;
+            } catch (RemoteException e) {
+                throw new IllegalStateException("Failed to remove legacy nice app", e);
+            }
+        }
 
         removeRule(uid, HAPPY_BOX_MATCH, "removeNiceApp");
     }
@@ -513,6 +577,16 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void setChildChain(final int childChain, final boolean enable) {
         throwIfPreT("setChildChain is not available on pre-T devices");
+
+        if (sConfigurationMap == null) {
+            try {
+                mNetd.firewallEnableChildChain(childChain, enable);
+                BpfNetMapsReader.setLegacyChainEnabled(childChain, enable);
+                return;
+            } catch (RemoteException e) {
+                throw new IllegalStateException("Failed to update legacy firewall chain", e);
+            }
+        }
 
         final long match = getMatchByFirewallChain(childChain);
         try {
@@ -542,6 +616,7 @@ public class BpfNetMaps {
     @Deprecated
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public boolean isChainEnabled(final int childChain) {
+        if (sConfigurationMap == null) return BpfNetMapsReader.isChainEnabled(null, childChain);
         return BpfNetMapsReader.isChainEnabled(sConfigurationMap, childChain);
     }
 
@@ -565,6 +640,25 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void replaceUidChain(final int chain, final int[] uids) {
         throwIfPreT("replaceUidChain is not available on pre-T devices");
+
+        if (sUidOwnerMap == null) {
+            final boolean allowlist;
+            try {
+                allowlist = isFirewallAllowList(chain);
+            } catch (ServiceSpecificException e) {
+                throw new IllegalArgumentException("Invalid firewall chain: " + chain);
+            }
+            final String chainName = getLegacyChainName(chain);
+            try {
+                if (!mNetd.firewallReplaceUidChain(chainName, allowlist, uids)) {
+                    throw new IllegalStateException("netd rejected legacy firewall chain update");
+                }
+                BpfNetMapsReader.setLegacyUidRules(chain, uids, allowlist);
+                return;
+            } catch (RemoteException e) {
+                throw new IllegalStateException("Failed to replace legacy firewall chain", e);
+            }
+        }
 
         final long match;
         try {
@@ -614,6 +708,17 @@ public class BpfNetMaps {
     public void setUidRule(final int childChain, final int uid, final int firewallRule) {
         throwIfPreT("setUidRule is not available on pre-T devices");
 
+        if (sUidOwnerMap == null) {
+            try {
+                mNetd.firewallSetUidRule(childChain, uid, firewallRule);
+                BpfNetMapsReader.setLegacyUidRule(childChain, uid, firewallRule,
+                        isFirewallAllowList(childChain));
+                return;
+            } catch (RemoteException e) {
+                throw new IllegalStateException("Failed to update legacy UID firewall rule", e);
+            }
+        }
+
         final long match = getMatchByFirewallChain(childChain);
         final boolean isAllowList = isFirewallAllowList(childChain);
         final boolean add = (firewallRule == FIREWALL_RULE_ALLOW && isAllowList)
@@ -640,12 +745,16 @@ public class BpfNetMaps {
      */
     // TODO: Migrate the callers to use {@link BpfNetMapsReader#getUidRule} instead.
     public int getUidRule(final int childChain, final int uid) {
+        if (sUidOwnerMap == null) return BpfNetMapsReader.getUidRule(null, childChain, uid);
         return BpfNetMapsReader.getUidRule(sUidOwnerMap, childChain, uid);
     }
 
     private Set<Integer> getUidsMatchEnabled(final int childChain) throws ErrnoException {
         final long match = getMatchByFirewallChain(childChain);
         Set<Integer> uids = new ArraySet<>();
+
+        if (sUidOwnerMap == null) return BpfNetMapsReader.getLegacyUidRules(childChain);
+
         synchronized (sUidOwnerMap) {
             sUidOwnerMap.forEach((uid, val) -> {
                 if (val == null) {
@@ -802,6 +911,8 @@ public class BpfNetMaps {
     public void swapActiveStatsMap() {
         throwIfPreT("swapActiveStatsMap is not available on pre-T devices");
 
+        if (sConfigurationMap == null) return;
+
         try {
             synchronized (sCurrentStatsMapConfigLock) {
                 final long config = sConfigurationMap.getValue(
@@ -842,6 +953,8 @@ public class BpfNetMaps {
             return;
         }
 
+        if (sUidPermissionMap == null) return;
+
         // Remove the entry if package is uninstalled or uid has only INTERNET permission.
         if (permissions == PERMISSION_UNINSTALLED || permissions == PERMISSION_INTERNET) {
             for (final int uid : uids) {
@@ -876,12 +989,39 @@ public class BpfNetMaps {
     public void setDataSaverEnabled(boolean enable) {
         throwIfPreT("setDataSaverEnabled is not available on pre-T devices");
 
+        if (sDataSaverEnabledMap == null) {
+            try {
+                if (!mNetd.bandwidthEnableDataSaver(enable)) {
+                    throw new IllegalStateException("netd rejected legacy Data Saver state");
+                }
+                BpfNetMapsReader.setLegacyDataSaverEnabled(enable);
+                return;
+            } catch (RemoteException e) {
+                throw new IllegalStateException("Failed to update legacy Data Saver state", e);
+            }
+        }
+
         try {
             final short config = enable ? DATA_SAVER_ENABLED : DATA_SAVER_DISABLED;
             sDataSaverEnabledMap.updateEntry(DATA_SAVER_ENABLED_KEY, new U8(config));
         } catch (ErrnoException e) {
             throw new ServiceSpecificException(e.errno, "Unable to set data saver: "
                     + Os.strerror(e.errno));
+        }
+    }
+
+    private static String getLegacyChainName(int chain) {
+        switch (chain) {
+            case FIREWALL_CHAIN_DOZABLE: return "fw_dozable";
+            case FIREWALL_CHAIN_STANDBY: return "fw_standby";
+            case FIREWALL_CHAIN_POWERSAVE: return "fw_powersave";
+            case FIREWALL_CHAIN_RESTRICTED: return "fw_restricted";
+            case FIREWALL_CHAIN_LOW_POWER_STANDBY: return "fw_low_power_standby";
+            case FIREWALL_CHAIN_BACKGROUND: return "fw_background";
+            case FIREWALL_CHAIN_OEM_DENY_1: return "fw_oem_deny_1";
+            case FIREWALL_CHAIN_OEM_DENY_2: return "fw_oem_deny_2";
+            case FIREWALL_CHAIN_OEM_DENY_3: return "fw_oem_deny_3";
+            default: throw new IllegalArgumentException("Invalid firewall chain: " + chain);
         }
     }
 
@@ -894,6 +1034,9 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void setIngressDiscardRule(final InetAddress address, final String iface) {
         throwIfPreT("setIngressDiscardRule is not available on pre-T devices");
+
+        if (sIngressDiscardMap == null) return;
+
         final int ifIndex = mDeps.getIfIndex(iface);
         if (ifIndex == 0) {
             Log.e(TAG, "Failed to get if index, skip setting ingress discard rule for " + address
@@ -917,6 +1060,9 @@ public class BpfNetMaps {
     @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     public void removeIngressDiscardRule(final InetAddress address) {
         throwIfPreT("removeIngressDiscardRule is not available on pre-T devices");
+
+        if (sIngressDiscardMap == null) return;
+
         try {
             sIngressDiscardMap.deleteEntry(new IngressDiscardKey(address));
         } catch (ErrnoException e) {
@@ -940,7 +1086,9 @@ public class BpfNetMaps {
         // deletion. netd and skDestroyListener could delete CookieTagMap entry concurrently.
         // So using Set to count the number of entry in the map.
         Set<K> keySet = new ArraySet<>();
-        map.forEach((k, v) -> keySet.add(k));
+        if (map != null) {
+            map.forEach((k, v) -> keySet.add(k));
+        }
         return keySet.size();
     }
 
@@ -987,6 +1135,8 @@ public class BpfNetMaps {
     }
 
     private void dumpOwnerMatchConfig(final IndentingPrintWriter pw) {
+        if (sConfigurationMap == null) return;
+
         try {
             final long match = sConfigurationMap.getValue(UID_RULES_CONFIGURATION_KEY).val;
             pw.println("current ownerMatch configuration: " + match + " " + matchToString(match));
@@ -996,6 +1146,8 @@ public class BpfNetMaps {
     }
 
     private void dumpCurrentStatsMapConfig(final IndentingPrintWriter pw) {
+        if (sConfigurationMap == null) return;
+
         try {
             final long config = sConfigurationMap.getValue(CURRENT_STATS_MAP_CONFIGURATION_KEY).val;
             final String currentStatsMap =
@@ -1007,6 +1159,8 @@ public class BpfNetMaps {
     }
 
     private void dumpDataSaverConfig(final IndentingPrintWriter pw) {
+        if (sDataSaverEnabledMap == null) return;
+
         try {
             final short config = sDataSaverEnabledMap.getValue(DATA_SAVER_ENABLED_KEY).val;
             // Any non-zero value converted from short to boolean is true by convention.

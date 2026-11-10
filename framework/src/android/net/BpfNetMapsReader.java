@@ -36,6 +36,7 @@ import android.os.Build;
 import android.os.ServiceSpecificException;
 import android.system.ErrnoException;
 import android.system.Os;
+import android.util.ArraySet;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.modules.utils.build.SdkLevel;
@@ -45,6 +46,11 @@ import com.android.net.module.util.Struct.S32;
 import com.android.net.module.util.Struct.U32;
 import com.android.net.module.util.Struct.U8;
 
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
 /**
  * A helper class to *read* java BpfMaps.
  * @hide
@@ -52,6 +58,12 @@ import com.android.net.module.util.Struct.U8;
 @RequiresApi(Build.VERSION_CODES.TIRAMISU)  // BPF maps were only mainlined in T
 public class BpfNetMapsReader {
     private static final String TAG = BpfNetMapsReader.class.getSimpleName();
+    private static final Object sLegacyStateLock = new Object();
+    private static final Map<Integer, Boolean> sLegacyChainEnabled = new HashMap<>();
+    private static final Map<Integer, Set<Integer>> sLegacyUidRules = new HashMap<>();
+    private static final Set<Integer> sLegacyNaughtyUids = new HashSet<>();
+    private static final Set<Integer> sLegacyNiceUids = new HashSet<>();
+    private static boolean sLegacyDataSaverEnabled;
 
     // Locally store the handle of bpf maps. The FileDescriptors are statically cached inside the
     // BpfMap implementation.
@@ -124,7 +136,10 @@ public class BpfNetMapsReader {
                 return new BpfMap<>(CONFIGURATION_MAP_PATH, BpfMap.BPF_F_RDONLY,
                         S32.class, U32.class);
             } catch (ErrnoException e) {
-                throw new IllegalStateException("Cannot open configuration map", e);
+                if (android.os.SystemProperties.getBoolean("ro.kernel.ebpf.supported", true)) {
+                    throw new IllegalStateException("Cannot open configuration map", e);
+                }
+                return null;
             }
         }
 
@@ -134,7 +149,10 @@ public class BpfNetMapsReader {
                 return new BpfMap<>(UID_OWNER_MAP_PATH, BpfMap.BPF_F_RDONLY,
                         S32.class, UidOwnerValue.class);
             } catch (ErrnoException e) {
-                throw new IllegalStateException("Cannot open uid owner map", e);
+                if (android.os.SystemProperties.getBoolean("ro.kernel.ebpf.supported", true)) {
+                    throw new IllegalStateException("Cannot open uid owner map", e);
+                }
+                return null;
             }
         }
 
@@ -144,7 +162,10 @@ public class BpfNetMapsReader {
                 return new BpfMap<>(DATA_SAVER_ENABLED_MAP_PATH, BpfMap.BPF_F_RDONLY, S32.class,
                         U8.class);
             } catch (ErrnoException e) {
-                throw new IllegalStateException("Cannot open data saver enabled map", e);
+                if (android.os.SystemProperties.getBoolean("ro.kernel.ebpf.supported", true)) {
+                    throw new IllegalStateException("Cannot open data saver enabled map", e);
+                }
+                return null;
             }
         }
     }
@@ -191,6 +212,12 @@ public class BpfNetMapsReader {
             final IBpfMap<S32, U32> configurationMap, final int chain) {
         throwIfPreT("isChainEnabled is not available on pre-T devices");
 
+        if (configurationMap == null) {
+            synchronized (sLegacyStateLock) {
+                return sLegacyChainEnabled.getOrDefault(chain, false);
+            }
+        }
+
         final long match = getMatchByFirewallChain(chain);
         try {
             final U32 config = configurationMap.getValue(UID_RULES_CONFIGURATION_KEY);
@@ -215,6 +242,15 @@ public class BpfNetMapsReader {
     public static int getUidRule(final IBpfMap<S32, UidOwnerValue> uidOwnerMap,
             final int chain, final int uid) {
         throwIfPreT("getUidRule is not available on pre-T devices");
+
+        if (uidOwnerMap == null) {
+            final boolean allowlist = isFirewallAllowList(chain);
+            synchronized (sLegacyStateLock) {
+                final Set<Integer> rules = sLegacyUidRules.get(chain);
+                final boolean explicitRule = rules != null && rules.contains(uid);
+                return explicitRule == allowlist ? FIREWALL_RULE_ALLOW : FIREWALL_RULE_DENY;
+            }
+        }
 
         final long match = getMatchByFirewallChain(chain);
         final boolean isAllowList = isFirewallAllowList(chain);
@@ -243,6 +279,23 @@ public class BpfNetMapsReader {
     public boolean isUidNetworkingBlocked(final int uid, boolean isNetworkMetered,
             boolean isDataSaverEnabled) {
         throwIfPreT("isUidBlockedByFirewallChains is not available on pre-T devices");
+
+        if (mConfigurationMap == null) {
+            for (final int chain : BpfNetMapsConstants.ALLOW_CHAINS) {
+                if (isChainEnabled(null, chain)
+                        && getUidRule(null, chain, uid) == FIREWALL_RULE_DENY) return true;
+            }
+            for (final int chain : BpfNetMapsConstants.DENY_CHAINS) {
+                if (isChainEnabled(null, chain)
+                        && getUidRule(null, chain, uid) == FIREWALL_RULE_DENY) return true;
+            }
+            if (!isNetworkMetered) return false;
+            synchronized (sLegacyStateLock) {
+                if (sLegacyNaughtyUids.contains(uid)) return true;
+                if (sLegacyNiceUids.contains(uid)) return false;
+                return sLegacyDataSaverEnabled;
+            }
+        }
 
         final long uidRuleConfig;
         final long uidMatch;
@@ -277,11 +330,64 @@ public class BpfNetMapsReader {
     public boolean getDataSaverEnabled() {
         throwIfPreT("getDataSaverEnabled is not available on pre-T devices");
 
+        if (mDataSaverEnabledMap == null) {
+            synchronized (sLegacyStateLock) {
+                return sLegacyDataSaverEnabled;
+            }
+        }
         try {
             return mDataSaverEnabledMap.getValue(DATA_SAVER_ENABLED_KEY).val == DATA_SAVER_ENABLED;
         } catch (ErrnoException e) {
             throw new ServiceSpecificException(e.errno, "Unable to get data saver: "
                     + Os.strerror(e.errno));
+        }
+    }
+
+    public static void setLegacyChainEnabled(int chain, boolean enabled) {
+        synchronized (sLegacyStateLock) {
+            sLegacyChainEnabled.put(chain, enabled);
+        }
+    }
+
+    public static void setLegacyUidRules(int chain, int[] uids, boolean allowlist) {
+        synchronized (sLegacyStateLock) {
+            final Set<Integer> rules = new ArraySet<>();
+            for (final int uid : uids) rules.add(uid);
+            sLegacyUidRules.put(chain, rules);
+        }
+    }
+
+    public static void setLegacyUidRule(int chain, int uid, int rule, boolean allowlist) {
+        synchronized (sLegacyStateLock) {
+            final Set<Integer> rules = sLegacyUidRules.computeIfAbsent(chain,
+                    ignored -> new ArraySet<>());
+            final boolean isExplicit = allowlist ? rule == FIREWALL_RULE_ALLOW
+                    : rule == FIREWALL_RULE_DENY;
+            if (isExplicit) rules.add(uid);
+            else rules.remove(uid);
+        }
+    }
+
+    public static Set<Integer> getLegacyUidRules(int chain) {
+        synchronized (sLegacyStateLock) {
+            final Set<Integer> result = new ArraySet<>();
+            final Set<Integer> rules = sLegacyUidRules.get(chain);
+            if (rules != null) result.addAll(rules);
+            return result;
+        }
+    }
+
+    public static void setLegacySpecialApp(int uid, boolean naughty, boolean enabled) {
+        synchronized (sLegacyStateLock) {
+            final Set<Integer> rules = naughty ? sLegacyNaughtyUids : sLegacyNiceUids;
+            if (enabled) rules.add(uid);
+            else rules.remove(uid);
+        }
+    }
+
+    public static void setLegacyDataSaverEnabled(boolean enabled) {
+        synchronized (sLegacyStateLock) {
+            sLegacyDataSaverEnabled = enabled;
         }
     }
 }
