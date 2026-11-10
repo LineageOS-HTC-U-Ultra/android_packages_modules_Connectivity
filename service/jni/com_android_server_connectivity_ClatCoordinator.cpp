@@ -33,6 +33,7 @@
 #include <string>
 #include <unistd.h>
 
+#include <android-base/properties.h>
 #include <android-modules-utils/sdk_level.h>
 #include <bpf/BpfMap.h>
 #include <bpf/BpfUtils.h>
@@ -105,6 +106,12 @@ static void verifyClatPerms() {
     // failures here are 99% likely to be build problems.
     V(kClatdDir, S_IFDIR|0750, ROOT, SYSTEM, "system_file", DIR);
     V(kClatdBin, S_IFREG|S_ISUID|S_ISGID|0755, CLAT, CLAT, "clatd_exec", BIN);
+
+    // Legacy kernels explicitly disable eBPF, so the CLAT BPF objects do not exist.
+    if (!android::base::GetBoolProperty("ro.kernel.ebpf.supported", true)) {
+        if (fatal) abort();
+        return;
+    }
 
     // Move on to verifying that the bpf programs and maps are as expected.
     // This relies on the kernel and bpfloader.

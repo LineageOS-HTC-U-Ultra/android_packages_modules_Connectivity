@@ -34,6 +34,7 @@ import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.os.ServiceSpecificException;
+import android.os.SystemProperties;
 import android.system.ErrnoException;
 import android.util.Log;
 
@@ -134,6 +135,7 @@ public class ClatCoordinator {
     private final IBpfMap<ClatEgress4Key, ClatEgress4Value> mEgressMap;
     @Nullable
     private final IBpfMap<CookieTagMapKey, CookieTagMapValue> mCookieTagMap;
+    private final boolean mBpfSupported;
     @Nullable
     private ClatdTracker mClatdTracker = null;
 
@@ -394,9 +396,16 @@ public class ClatCoordinator {
     public ClatCoordinator(@NonNull Dependencies deps) {
         mDeps = deps;
         mNetd = mDeps.getNetd();
-        mIngressMap = mDeps.getBpfIngress6Map();
-        mEgressMap = mDeps.getBpfEgress4Map();
-        mCookieTagMap = mDeps.getBpfCookieTagMap();
+        mBpfSupported = SystemProperties.getBoolean("ro.kernel.ebpf.supported", true);
+        if (mBpfSupported) {
+            mIngressMap = mDeps.getBpfIngress6Map();
+            mEgressMap = mDeps.getBpfEgress4Map();
+            mCookieTagMap = mDeps.getBpfCookieTagMap();
+        } else {
+            mIngressMap = null;
+            mEgressMap = null;
+            mCookieTagMap = null;
+        }
     }
 
     private void maybeStartBpf(final ClatdTracker tracker) {
@@ -547,6 +556,8 @@ public class ClatCoordinator {
 
     private void tagSocketAsClat(long cookie) throws IOException {
         if (mCookieTagMap == null) {
+            // Legacy qtaguid accounting has no BPF cookie-tag map to populate.
+            if (!mBpfSupported) return;
             throw new IOException("Cookie tag map is not initialized");
         }
 
@@ -566,6 +577,8 @@ public class ClatCoordinator {
 
     private void untagSocket(long cookie) throws IOException {
         if (mCookieTagMap == null) {
+            // Legacy qtaguid accounting has no BPF cookie-tag map to clear.
+            if (!mBpfSupported) return;
             throw new IOException("Cookie tag map is not initialized");
         }
 
